@@ -51,5 +51,5 @@ def test_BUG_import_clobbers_require():
     import re
 
     re2 = pypm.require('re')
-        
+
     assert re is not re2

@@ -12,6 +12,7 @@ import collections
 import urllib2
 import tempfile
 import shutil
+import tarfile
 
 from distutils.core import run_setup
 from distutils.version import LooseVersion
@@ -34,6 +35,8 @@ def install_package_dependencies(dist_package_path=None):
 
     dist_package_path = dist_package_path or os.getcwd()
 
+    sys.path.append(dist_package_path)
+
     setup_path = os.path.join(dist_package_path, 'setup.py')
 
     setup = run_setup(setup_path)
@@ -53,11 +56,50 @@ def install_package_dependencies(dist_package_path=None):
     pymodules_path = make_pymodules_directory(target_path=py_package_path)
 
     requirements = (parse_requirement(r) for r in setup.get_requires())
+    install_requires = []
+
+    if (hasattr(setup, 'install_requires') and
+        setup.install_requires is not None):
+
+        #######################################################################
+        # Hacky hack for setup.py's that use strings instead of the canonical
+        # lists for requirements declarations.
+        # TODO(kevinconway): Create some sort of parsing function to fix this.
+        if type(setup.install_requires) is str:
+
+            setup.install_requires = [setup.install_requires]
+        #######################################################################
+
+        install_requires = (parse_requirement(r)
+                            for r in setup.install_requires)
+
+    def all_requirements():
+        """Merge all requires into one generator."""
+
+        try:
+
+            for r in requirements:
+
+                yield r
+
+        except StopIteration:
+
+            pass
+
+        try:
+
+            for r in install_requires:
+
+                yield r
+
+        except StopIteration:
+
+            pass
 
     # Grap PyPi releases for deps.
     releases = (get_release(package=r.package,
                             comparison=r.comparison,
-                            version=r.version) for r in requirements)
+                            version=r.version) for r in all_requirements())
 
     downloads = (download_release(package=r.package + '-dist',
                                   handle=r.handle,
@@ -95,7 +137,8 @@ def make_pymodules_directory(target_path=None):
 
     pymodules_dir = os.path.join(target_path, '.pymodules')
 
-    os.mkdir(pymodules_dir)
+    if not os.path.isdir(pymodules_dir):
+        os.mkdir(pymodules_dir)
 
     return pymodules_dir
 
@@ -127,6 +170,18 @@ def parse_requirement(requirement):
 
     package_data = re.split(comparisons, package)
 
+    ###########################################################################
+    # Hacky hack to work around multiple version requirement strings for a
+    # single module.
+    # TODO(kevinconway): Create some sort of parsing function to fix this.
+    if len(package_data) > 3:
+
+        package_data = package_data[:3]
+    ###########################################################################
+
+    print requirement
+    print package_data
+
     # If the the requirement contains a version then unpack it into pieces.
     if len(package_data) > 1:
 
@@ -140,7 +195,7 @@ def parse_requirement(requirement):
     pkg.comparison = comparison
     pkg.version = version
 
-    return package, comparison, version
+    return pkg
 
 
 def get_release(package, comparison=None, version=None):
@@ -155,6 +210,10 @@ def get_release(package, comparison=None, version=None):
     """
 
     available_versions = pypi_client.package_releases(package, True)
+
+    if len(available_versions) < 1:
+
+        raise Exception("No releases found for package (%s)." % (package,))
 
     final_version = None
 
@@ -251,19 +310,19 @@ def download_release(package, handle, target_path=None):
     target_path = os.path.join(target_path, package)
 
     tempdir = tempfile.mkdtemp()
-    tarfile = os.path.join(tempdir, 'package')
-    tarball = open(tarfile, 'wb+')
+    tarpath = os.path.join(tempdir, 'package')
+    tarball = open(tarpath, 'wb')
     tarball.write(handle.read())
-
-    handle.close()
     tarball.close()
 
-    tarball = tarfile.TarFile(tarfile)
+    tarball = open(tarpath, 'rb')
+    tarball = tarfile.open(tarpath, fileobj=tarball)
     unpacked_path = os.path.join(tempdir, package)
     tarball.extractall(unpacked_path)
+    package_folder_name = [n for n in tarball.getnames() if '/' not in n][0]
     tarball.close()
 
-    os.renames(unpacked_path, target_path)
+    os.renames(os.path.join(unpacked_path, package_folder_name), target_path)
 
     download = collections.namedtuple('Download', ['package', 'path'])
     download.package = package
