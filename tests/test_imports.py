@@ -1,6 +1,8 @@
 import os
 import sys
 
+# Modify the sys.path to allow tests to be run without
+# installing the module.
 test_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(1, test_path + '/../')
 
@@ -46,10 +48,8 @@ def test_require_not_conflict_with_import():
 
 
 @pytest.mark.xfail
-def test_BUG_import_clobbers_require():
-
-    import re
+def test_BUG_require_cannot_override_standard_lib():
 
     re2 = pypm.require('re')
 
-    assert re is not re2
+    assert '.pymodules' in repr(re2)
