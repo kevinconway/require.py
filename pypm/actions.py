@@ -59,7 +59,7 @@ def install_package_dependencies(dist_package_path=None):
     install_requires = []
 
     if (hasattr(setup, 'install_requires') and
-        setup.install_requires is not None):
+            setup.install_requires is not None):
 
         #######################################################################
         # Hacky hack for setup.py's that use strings instead of the canonical
