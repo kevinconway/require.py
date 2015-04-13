@@ -1,125 +1,228 @@
+"""Alternate import logic that provides for multiple dependency versions."""
+
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
+
+from collections import defaultdict
+import contextlib
+import inspect
+import os
 import sys
 from os import path
-import inspect
 
 # If this is the first import of this module then store a reference to the
-# original, builtin import statement.
+# original, builtin import statement. This is used later for the optional
+# patching, and restoration, of the import command.
 if '__original__import' not in sys.modules:
 
     sys.modules['__original__import'] = sys.modules['__builtin__'].__import__
 
-# Replacement dict for sys.modules. This is used to allows multiple versions
-# of the same modules to be loaded into a single Python process.
-MODULE_CACHE = {}
 
+class ModuleCache(object):
 
-def require(name, locals=None, globals=None, fromlist=None, level=-1):
-    """This function wraps the native import to provide pypm routing.
+    """Replacment for sys.modules that respects the physical path of an import.
 
-    The basic idea behind pypm routing is to manipulate the sys.path to allow
-    the native python import statement to load local dependencies before
-    falling back on global imports.
-
-    The purpose of this is to allow each package to use a different copy, or
-    even a different version, of a particular dependency.
-
-    In the case of global singletons exposed by a module, this allows packages
-    importing those singletons to maintain their own private copies that are
-    unaltered by other packages importing the same singletons.
-
-    In the case of two packages requiring different versions of the same
-    libraries, this allows each package to have the appropriate version loaded
-    in the same python process without causing conflicts.
+    The standard sys.modules cache can only cache on version of a module that
+    has been imported. This replacement uses the file path of the requesting
+    module (the one performing the import) as a secondary key when drawing
+    from the cache.
     """
 
-    # Generate a path to the local pymodules_dir by using the inspect library.
-    # Inspect allows us to get the location of the file from which the import
-    # statement was called. Using that we can derive the absolute path of the
-    # directory the file is in and use that as the base for the pymodules_dir.
-    calling_file = inspect.getfile(inspect.stack()[1][0])
-    calling_dir = path.dirname(path.abspath(calling_file))
-    pymodules_dir = path.join(calling_dir, '.pymodules')
-    pymodules_dir_exists = path.isdir(pymodules_dir)
+    def __init__(self):
+        """Initialize the module cache."""
+        self._cache = defaultdict(dict)
 
-    # Reimplement the sys.modules cache to account for removing localized
-    # modules from the global module cache. This allows us to both cache
-    # modules once they are imported as well as providing for the ability
-    # to load multiple versions of the same module in the same python process.
-    if name in MODULE_CACHE:
+    def set(self, name, path, module):
+        """Store a module in the cache with the given path key.
 
-        # See if this module has already attempted to import the requested
-        # module before. Return it if already loaded.
-        if calling_dir in MODULE_CACHE[name]:
+        Args:
+            name (str): The name of the import.
+            path (str): The absolute path of the requesting module directory.
+            module (object): The Python module object to store.
+        """
+        self._cache[name][path] = module
 
-            return MODULE_CACHE[name][calling_dir]
+    def cached(self, name, path):
+        """Determine if an import is already cached.
 
-        # Scan the import cache for an instance where a parent module has
-        # already imported the requested module. If a parent has imported
-        # the module then we want that version of the module.
-        for k in sorted(MODULE_CACHE[name], key=len, reverse=True):
+        Args:
+            name (str): The name of the import.
+            path (str): The absolute path of the requesting module directory.
 
-            if calling_dir.startswith(k):
+        Returns:
+            Bool: True if cached else False.
+        """
+        return name in self._cache and path in self._cache[name]
+
+    def get(self, name, path, default=None):
+        """Fetch a module from the cache with a given path key.
+
+        Args:
+            name (str): The name of the import.
+            path (str): The absolute path of the requesting module directory.
+            default: The value to return if not found. Defaults to None.
+        """
+        return self._cache[name].get(path, default)
+
+    def get_nearest(self, name, path, default=None):
+        """Fetch the module from the cache nearest the given path key.
+
+        Args:
+            name (str): The name of the import.
+            path (str): The absolute path of the requesting module directory.
+            default: The value to return if not found. Defaults to None.
+
+        If the specific path key is not present in the cache, this method will
+        search the cache for the nearest parent path with a cached value. If
+        a parent cache is found it is returned. Otherwise the given default
+        value is returned.
+        """
+        if self.cached(name, path):
+
+            return self.get(name, path, default)
+
+        for parent in sorted(self._cache[name], key=len, reverse=True):
+
+            if path.startswith(parent):
 
                 # Set the cache for quicker lookups later.
-                MODULE_CACHE[name][calling_dir] = MODULE_CACHE[name][k]
+                self.set(name, path, self.get(name, parent))
+                return self.get(name, path, default)
 
-                return MODULE_CACHE[name][calling_dir]
+        return default
 
-    if pymodules_dir_exists is True:
 
-        # Make the pymodules_dir the first item on the import path.
-        # Note, sys.path[0] should not be modified.
-        sys.path.insert(1, pymodules_dir)
+@contextlib.contextmanager
+def local_modules(path, pymodules='.pymodules'):
+    """Set the nearest pymodules directory to the first sys.path element.
 
-    # Use the builtin import function to grab the modules for us.
-    # It will scan the search path and import the appropriate module.
-    # It also registers the modules with sys.modules.
+    Args:
+        path (str): The path to start the search in.
+        pymodules (str): The name of the pymodules directory to search for.
+            The default value is .pymodules.
+
+    If no valid pymodules directory is found in the path no sys.path
+    manipulation will take place.
+    """
+    path = os.path.abspath(path)
+    previous_path = None
+    target_path = None
+
+    while previous_path != path:
+
+        if os.path.isdir(os.path.join(path, pymodules)):
+
+            target_path = path
+            break
+
+        previous_path, path = path, os.path.dirname(path)
+
+    if target_path:
+
+        sys.path.insert(1, os.path.join(target_path, pymodules))
+
     try:
 
-        module = sys.modules['__original__import'](name,
-                                                   locals,
-                                                   globals,
-                                                   fromlist,
-                                                   level)
+        yield target_path
 
-    # Once the module is imported, remove the pymodules_dir from the search
-    # path to prevent accidental imports from the wrong location.
     finally:
 
-        if pymodules_dir_exists is True:
+        if target_path:
 
             sys.path.pop(1)
 
-    # The import statement caches modules in sys.modules so that it does not
-    # have to reload them each time. This is what allows modules to expose
-    # global singletons across multiple imports. By removing modules loaded
-    # from pymodules_dir from the sys.modules cache we are both preventing
-    # cache conflicts when multiple versions of the same modules are loaded
-    # from different pymodules_dir and breaking the expected functionality of
-    # python imports which is that we expect to get the same module with each
-    # subsequent call to import. This functionality must be replaced with a
-    # custom module cache to replicate the expected behaviour of import.
-    if '.pymodules' in repr(module):
 
-        del sys.modules[name]
+class Importer(object):
 
-        # Create the module cache key if it doesn't already exist.
-        MODULE_CACHE[name] = MODULE_CACHE.get(name, {})
-        # Set the module cache for future calls.
-        MODULE_CACHE[name][calling_dir] = module
+    """An import statement replacement.
 
-    # Enjoy your fresh new module object.
-    return module
+    This import statement alternative uses a custom module cache and path
+    manipulation to override the default Python import behaviour.
+    """
+
+    def __init__(self, cache=None, pymodules='.pymodules'):
+        """Initialize the importer with a custom cache.
+
+        Args:
+            cache (ModuleCache): An instance of ModuleCache.
+            pymodules (str): The name to use when searching for pymodules.
+        """
+        self._cache = cache or ModuleCache()
+        self._pymodules = pymodules or '.pymodules'
+
+    @staticmethod
+    def _calling_dir():
+        """Get the directory containing the code that called require.
+
+        This function will look 2 or 3 frames up from the stack in order to
+        resolve the directory depending on whether require was called
+        directly or proxied through __call__.
+        """
+        stack = inspect.stack()
+        current_file = __file__
+        if not current_file.endswith('.py'):
+
+            current_file = current_file[:-1]
+
+        calling_file = inspect.getfile(stack[2][0])
+        if calling_file == current_file:
+
+            calling_file = inspect.getfile(stack[3][0])
+
+        return path.dirname(path.abspath(calling_file))
+
+    def require(
+            self,
+            name,
+            locals=None,
+            globals=None,
+            fromlist=None,
+            level=-1,
+    ):
+        """Import modules using the custom cache and path manipulations."""
+        calling_dir = self._calling_dir()
+        module = self._cache.get_nearest(name, calling_dir)
+        if module:
+
+            return module
+
+        with local_modules(calling_dir, self._pymodules) as pymodules:
+
+            module = sys.modules['__original__import'](
+                name,
+                locals,
+                globals,
+                fromlist,
+                level,
+            )
+
+        if self._pymodules in repr(module):
+
+            del sys.modules[name]
+            # Create the module cache key if it doesn't already exist.
+            self._cache.set(name, pymodules, module)
+
+        # Enjoy your fresh new module object.
+        return module
+
+    def __call__(self, *args, **kwargs):
+        """Proxy functions for require."""
+        return self.require(*args, **kwargs)
 
 
-def patch_import():
+require = Importer()
+
+
+def patch_import(importer=require):
     """Replace the builtin import statement with the wrapped version.
 
     This function may be called multiple times without having negative side
     effects.
     """
 
-    sys.modules['__builtin__'].__import__ = require
+    sys.modules['__builtin__'].__import__ = importer
 
 
 def unpatch_import():
