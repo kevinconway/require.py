@@ -15,9 +15,10 @@ from os import path
 # If this is the first import of this module then store a reference to the
 # original, builtin import statement. This is used later for the optional
 # patching, and restoration, of the import command.
+BUILTINS_NAME = '__builtin__' if '__builtin__' in sys.modules else 'builtins'
 if '__original__import' not in sys.modules:
 
-    sys.modules['__original__import'] = sys.modules['__builtin__'].__import__
+    sys.modules['__original__import'] = sys.modules[BUILTINS_NAME].__import__
 
 
 class ModuleCache(object):
@@ -179,9 +180,11 @@ class Importer(object):
             locals=None,
             globals=None,
             fromlist=None,
-            level=-1,
+            level=None,
     ):
         """Import modules using the custom cache and path manipulations."""
+        # Default and allowed values change after 3.3.
+        level = -1 if sys.version_info[:2] < (3, 3) else 0
         calling_dir = self._calling_dir()
         module = self._cache.get_nearest(name, calling_dir)
         if module:
@@ -222,7 +225,7 @@ def patch_import(importer=require):
     effects.
     """
 
-    sys.modules['__builtin__'].__import__ = importer
+    sys.modules[BUILTINS_NAME].__import__ = importer
 
 
 def unpatch_import():
@@ -232,4 +235,4 @@ def unpatch_import():
     effects.
     """
 
-    sys.modules['__builtin__'].__import__ = sys.modules['__original__import']
+    sys.modules[BUILTINS_NAME].__import__ = sys.modules['__original__import']
