@@ -12,6 +12,11 @@ setup(
     author="Kevin Conway",
     author_email="kevinjacobconway@gmail.com",
     url="https://github.com/kevinconway/require.py",
-    py_modules=['require'],
+    packages=['require'],
     license='Apache2',
+    entry_points={
+        'console_scripts': [
+            'requirepy = require.cmd:install',
+        ],
+    },
 )
